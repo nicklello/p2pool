@@ -5,6 +5,7 @@ import random
 import re
 import sys
 import time
+import config
 
 from twisted.internet import defer
 from twisted.python import log
@@ -137,36 +138,82 @@ class WorkerBridge(worker_interface.WorkerBridge):
         return (my_shares_not_in_chain - my_doa_shares_not_in_chain, my_doa_shares_not_in_chain), my_shares, (orphans_recorded_in_chain, doas_recorded_in_chain)
     
     def get_user_details(self, username):
-        contents = re.split('([+/])', username)
-        assert len(contents) % 2 == 1
-        
-        user, contents2 = contents[0], contents[1:]
-        
         desired_pseudoshare_target = None
         desired_share_target = None
-        for symbol, parameter in zip(contents2[::2], contents2[1::2]):
-            if symbol == '+':
-                try:
-                    desired_pseudoshare_target = bitcoin_data.difficulty_to_target(float(parameter))
-                except:
-                    if p2pool.DEBUG:
-                        log.err()
-            elif symbol == '/':
-                try:
-                    desired_share_target = bitcoin_data.difficulty_to_target(float(parameter))
-                except:
-                    if p2pool.DEBUG:
-                        log.err()
+        pubkey_hash = self.my_pubkey_hash
+        return username, pubkey_hash, desired_share_target, desired_pseudoshare_target
+    
+    def logShare(self, share):
+        userDiff = 0
+        timeNow = time.time()
+        username = share['username']
         
-        if random.uniform(0, 100) < self.worker_fee:
-            pubkey_hash = self.my_pubkey_hash
-        else:
-            try:
-                pubkey_hash = bitcoin_data.address_to_pubkey_hash(user, self.node.net.PARENT)
-            except: # XXX blah
-                pubkey_hash = self.my_pubkey_hash
+        targetDiff = 1
+        if 'targetDiff' in share:
+            targetDiff = share['targetDiff']
         
-        return user, pubkey_hash, desired_share_target, desired_pseudoshare_target
+        blockHeight = share['blockHeight']
+        networkDiff = share['networkDiff']
+        shareDiff = share['shareDiff']
+        if username in config.workerStatus:
+            workerMutex = config.workerStatus[username]['mutex']
+            if workerMutex.acquire(1):
+                config.workerStatus[username]['remoteHost'] = share['remoteHost']
+                userOid = config.workerStatus[username]['userOid']
+                userDiff = config.workerStatus[username]['minDiff']
+                diffMax = config.workerStatus[username]['diffMax']
+                share1Count = config.workerStatus[username]['share1Count']
+                stale1Count = config.workerStatus[username]['stale1Count']
+                dupe1Count = config.workerStatus[username]['dupe1Count']
+                other1Count = config.workerStatus[username]['other1Count']
+                if share['ok']:
+                    share1Count = share1Count + targetDiff
+                    config.workerStatus[username]['share1Count'] = share1Count
+                
+                    if diffMax == -1:
+                        diffMax = shareDiff
+                        config.workerStatus[username]['diffMax'] = shareDiff
+                    else:
+                        if diffMax < shareDiff:
+                            diffMax = shareDiff
+                            config.workerStatus[username]['diffMax'] = diffMax
+                else:
+                    if share['rejectReason'] == 'stale-prevblk' or share['rejectReason'] == 'stale-work' or share['rejectReason'] == 'unknown-work':
+                        stale1Count = stale1Count + targetDiff
+                        config.workerStatus[username]['stale1Count'] = stale1Count
+                    elif share['rejectReason'] == 'duplicate':
+                        dupe1Count = dupe1Count + targetDiff
+                        config.workerStatus[username]['dupe1Count'] = dupe1Count
+                    else:
+                        other1Count = other1Count + targetDiff
+                        config.workerStatus[username]['other1Count'] = other1Count
+    
+                timeSpace = timeNow - config.workerStatus[username]['time']
+                if timeSpace > config.WORKER_STATUS_REFRESH_TIME:
+                    paymentMethod = config.workerStatus[username]['paymentMethod']
+                    config.workerStatus[username]['share1Count'] = 0
+                    config.workerStatus[username]['stale1Count'] = 0
+                    config.workerStatus[username]['dupe1Count'] = 0
+                    config.workerStatus[username]['other1Count'] = 0
+                    config.workerStatus[username]['diffMax'] = -1
+                    config.workerStatus[username]['time'] = timeNow
+                    workerMutex.release()
+                    
+                    speed = 0xffffffff * share1Count / timeSpace
+                    share['userOid'] = userOid
+                    share['paymentMethod'] = paymentMethod
+                    share['minDiff'] = userDiff
+                    share['speed'] = speed
+                    share['share1Count'] = share1Count
+                    share['stale1Count'] = stale1Count
+                    share['dupe1Count'] = dupe1Count
+                    share['other1Count'] = other1Count
+                    share['diffMax'] = diffMax
+                    share['timeSpace'] = timeSpace
+                    
+                    config.dbService.logShare(share)
+                else:
+                    workerMutex.release()
     
     def preprocess_request(self, user):
         if (self.node.p2p_node is None or len(self.node.p2p_node.peers) == 0) and self.node.net.PERSIST:
@@ -313,7 +360,10 @@ class WorkerBridge(worker_interface.WorkerBridge):
         lp_count = self.new_work_event.times
         merkle_link = bitcoin_data.calculate_merkle_link([None] + other_transaction_hashes, 0)
         
-        print 'New work for worker! Difficulty: %.06f Share difficulty: %.06f Total block value: %.6f %s including %i transactions' % (
+        block_height = self.current_work.value['height']
+        
+        print 'New work for worker! Block height: %d Difficulty: %.06f Share difficulty: %.06f Total block value: %.6f %s including %i transactions' % (
+            block_height,
             bitcoin_data.target_to_difficulty(target),
             bitcoin_data.target_to_difficulty(share_info['bits'].target),
             self.current_work.value['subsidy']*1e-8, self.node.net.PARENT.SYMBOL,
@@ -329,6 +379,7 @@ class WorkerBridge(worker_interface.WorkerBridge):
             timestamp=self.current_work.value['time'],
             bits=self.current_work.value['bits'],
             share_target=target,
+            block_height=block_height,
         )
         
         received_header_hashes = set()
@@ -410,12 +461,29 @@ class WorkerBridge(worker_interface.WorkerBridge):
                 
                 self.share_received.happened(bitcoin_data.target_to_average_attempts(share.target), not on_time, share.hash)
             
+            network_diff = bitcoin_data.target_to_difficulty(header['bits'].target)
+            target_diff = bitcoin_data.target_to_difficulty(target)
+            share_diff = bitcoin_data.target_to_difficulty(pow_hash)
+            share = {
+                'username': user,
+                'remoteHost': '127.0.0.1',
+                'blockHeight': block_height,
+                'networkDiff': network_diff,
+                'targetDiff': target_diff,
+                'shareDiff': share_diff,
+                'ok': True,
+            }
+            
             if pow_hash > target:
                 print 'Worker %s submitted share with hash > target:' % (user,)
                 print '    Hash:   %56x' % (pow_hash,)
                 print '    Target: %56x' % (target,)
+                share['ok'] = False
+                share['rejectReason'] = 'high-hash'
             elif header_hash in received_header_hashes:
                 print >>sys.stderr, 'Worker %s submitted share more than once!' % (user,)
+                share['ok'] = False
+                share['rejectReason'] = 'duplicate'
             else:
                 received_header_hashes.add(header_hash)
                 
@@ -425,6 +493,8 @@ class WorkerBridge(worker_interface.WorkerBridge):
                     self.recent_shares_ts_work.pop(0)
                 self.local_rate_monitor.add_datum(dict(work=bitcoin_data.target_to_average_attempts(target), dead=not on_time, user=user, share_target=share_info['bits'].target))
                 self.local_addr_rate_monitor.add_datum(dict(work=bitcoin_data.target_to_average_attempts(target), pubkey_hash=pubkey_hash))
+                
+            self.logShare(share)
             
             return on_time
         

@@ -1,5 +1,7 @@
 import random
 import sys
+import config
+import threading
 
 from twisted.internet import protocol, reactor
 from twisted.python import log
@@ -31,7 +33,37 @@ class StratumRPCMiningProvider(object):
     def rpc_authorize(self, username, password):
         self.username = username
         
-        reactor.callLater(0, self._send_work)
+        if self._authentication(username, password, ''):
+            reactor.callLater(0, self._send_work)
+            return True
+        return False
+    
+    def _authentication(self, username, password, ip):
+        if hasattr(username, 'decode'): username = username.decode('utf8')
+        if hasattr(password, 'decode'): password = password.decode('utf8')
+        
+        userWorker = config.dbService.checkAuthentication(username, password, ip)
+        if userWorker != None:
+            if username not in config.workerStatus:
+                config.workerStatus[username] = {
+                    'username': username,
+                    'userOid': userWorker['userOid'],
+                    'paymentMethod': userWorker['paymentMethod'],
+                    'minDiff': userWorker['minDiff'],
+                    'share1Count': 0,
+                    'stale1Count': 0,
+                    'dupe1Count': 0,
+                    'other1Count': 0,
+                    'remoteHost': '',
+                    'diffMax': -1,
+                    'time': 0,
+                    'mutex': threading.Lock(),
+                }
+            else:
+                config.workerStatus[username]['paymentMethod'] = userWorker['paymentMethod']
+                config.workerStatus[username]['minDiff'] = userWorker['minDiff']
+            return True
+        return False
     
     def _send_work(self):
         try:

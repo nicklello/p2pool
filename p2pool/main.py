@@ -10,6 +10,9 @@ import time
 import signal
 import traceback
 import urlparse
+import imp
+import config
+import dbservice
 
 if '--iocp' in sys.argv:
     from twisted.internet import iocpreactor
@@ -29,6 +32,23 @@ import p2pool, p2pool.data as p2pool_data, p2pool.node as p2pool_node
 def main(args, net, datadir_path, merged_urls, worker_endpoint):
     try:
         print 'p2pool (version %s)' % (p2pool.__version__,)
+        print
+        
+        print 'Create database connection ...'
+        if not hasattr(config, 'DbOptions'):
+            print 'Pool database config can not find in config'
+        name = config.DbOptions['type']
+        parameters = config.DbOptions
+        
+        try:
+            fp, pathname, description = imp.find_module(name, dbservice.__path__)
+            m = imp.load_module(name, fp, pathname, description)
+            lo = getattr(m, name)(**parameters)
+            config.dbService = lo
+        except:
+            print 'Error setting up db service logger %s: %s', name,  sys.exc_info()
+        
+        print '    ...success!'
         print
         
         @defer.inlineCallbacks
@@ -446,6 +466,13 @@ def run():
         type=str, action='store', default=[], nargs='*', dest='bitcoind_rpc_userpass')
     
     args = parser.parse_args()
+    
+    args.testnet = config.TestNet
+    args.address = config.Address
+    args.worker_endpoint = config.workerEndpoint
+    args.donation_percentage = config.DonationPercentage
+    args.upnp = config.Upnp
+    args.bitcoind_config_path = config.BitcoindConfigPath
     
     if args.debug:
         p2pool.DEBUG = True
