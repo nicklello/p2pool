@@ -1,7 +1,7 @@
 Requirements:
 -------------------------
 Generic:
-* Bitcoin >=0.8.5
+* Bitcoin >=0.11.1
 * Python >=2.6
 * Twisted >=10.0.0
 * python-argparse (for Python =2.6)
@@ -68,7 +68,7 @@ In bash type this:
     cd litecoin_scrypt
     C:\Python27\python.exe setup.py build --compile=mingw32 install
 
-Windows (microsoft visual c++)
+Windows (Microsoft Visual C++)
 * Open visual studio console
 
 In bash type this:
@@ -87,7 +87,7 @@ Run P2Pool with the "--net litecoin" option.
 Run your miner program, connecting to 127.0.0.1 on port 9327.
 Forward port 9338 to the host running P2Pool.
 
-Litecoin's use of ports 9332 and 9332 conflicts with P2Pool running on
+Litecoin's use of ports 9333 and 9332 conflicts with P2Pool running on
 the Bitcoin network. To avoid problems, add these lines to litecoin.conf
 and restart litecoind:
 
